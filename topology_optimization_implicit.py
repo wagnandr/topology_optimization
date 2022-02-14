@@ -2,6 +2,7 @@ import math
 import time
 import random
 import dolfin as df
+import numpy as np
 
 
 class InitialConditions(df.UserExpression):
@@ -113,9 +114,6 @@ class CahnHilliardProblem:
         a_diff_form = df.derivative(a_form, self.u_next, du)
 
         return a_diff_form, a_form 
-    
-    def setup_solvers(self):
-        pass
 
     def solve(self):
         a, L = self.forms()
@@ -191,7 +189,7 @@ class LinearElasticityProblem:
 
 if __name__ == '__main__':
     N = 32 
-    num_time_steps = 2**10 
+    num_time_steps = 2**12 
 
     tau_value = 1e-8 
     tau = df.Constant(tau_value)
@@ -219,7 +217,6 @@ if __name__ == '__main__':
         phi_init = df.Function(solver.function_space.sub(1).collapse())
         phi_init.interpolate(InitialConditions())
         df.assign(solver.u_now.sub(1), phi_init)
-        solver.setup_solvers()
 
         solution_file_u = df.File('output/u.pvd')
         solution_file_phi = df.File('output/phi.pvd')
@@ -246,21 +243,51 @@ if __name__ == '__main__':
         print('needed {}s'.format((time.time()-start)))
     else:
         V = solver.function_space.sub(1).collapse()
-        phi = df.Function(V)
-        checkpoint_file.read_checkpoint(phi, 'phi', 0)
+        phi_orig = df.Function(V, name='phi')
+        checkpoint_file.read_checkpoint(phi_orig, 'phi', 0)
 
-        elasticity_solver = LinearElasticityProblem(mesh, gamma_D, gamma_F, f, mu1, lambda1, eps) 
-
-        u = elasticity_solver.solve(phi)
-
-        energy_form = elasticity_solver.get_energy(u, phi)
-        energy = df.project(energy_form, V)
+        phi_orig.vector()[:] = np.clip(phi_orig.vector()[:], -1, +1)
 
         solution_file_phi = df.File('output/phi_noise.pvd')
         solution_file_u = df.File('output/u_noise.pvd')
         solution_file_energy = df.File('output/energy_noise.pvd')
 
-        solution_file_phi.write(phi, 0)
-        solution_file_u.write(u, 0)
-        solution_file_energy.write(energy, 0)
+        list_phi_samples = []
 
+        for i in range(10):
+            phi = phi_orig.copy(True)
+            phi.rename('phi', '') 
+
+            a = phi.vector()[:]
+            a = np.arctanh(a)
+            noise = np.random.normal(0, 0.5, a.shape)
+            mask = (phi.vector()[:] < 0.8) * (phi.vector()[:] > -0.8)
+            masked_noise = noise * mask 
+            a += masked_noise 
+            a = np.tanh(a)
+            phi.vector()[:] = a
+
+            elasticity_solver = LinearElasticityProblem(mesh, gamma_D, gamma_F, f, mu1, lambda1, eps) 
+
+            u = elasticity_solver.solve(phi)
+            u.rename('u', '')
+
+            energy_form = elasticity_solver.get_energy(u, phi)
+            energy = df.project(energy_form, V)
+            energy.rename('energy', '')
+
+            energy_value = df.assemble(energy_form * df.dx)
+            print('energy = {}'.format(energy_value))
+
+            solution_file_phi.write(phi, i)
+            solution_file_u.write(u, i)
+            solution_file_energy.write(energy, i)
+
+            list_phi_samples.append(phi)
+        
+        phi_mean = df.Function(V, name='phi_mean')
+        phi_mean_array = np.mean(np.array([phi.vector()[:].tolist() for phi in list_phi_samples]), axis=0)
+        phi_mean.vector()[:] = phi_mean_array 
+
+        phi_mean_file = df.File('output/phi_mean.pvd')
+        phi_mean_file.write(phi_mean, 0)
