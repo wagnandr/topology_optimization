@@ -42,6 +42,12 @@ class FullEquation(df.NonlinearProblem):
             bc.apply(A)
 
 
+def cut(x):
+    x = df.conditional(df.gt(x, 1), 1, x)
+    x = df.conditional(df.lt(x, -1), -1, x)
+    return x
+
+
 class CahnHilliardProblem:
     def __init__(self, mesh, tau, eps, gamma_F, f, gamma_D, mu1, lambda1):
         P1ElVec = df.VectorElement('P', mesh.ufl_cell(), 1)
@@ -84,10 +90,6 @@ class CahnHilliardProblem:
 
         energy = - 2 * mu_diff * df.inner(epsilon(u), epsilon(u)) + lambda_diff * df.div(u) * df.div(u)
 
-        def cut(x):
-            x = df.conditional(df.gt(x, 1), 1, x)
-            x = df.conditional(df.lt(x, -1), -1, x)
-            return x
 
         mu_le = df.Constant(0.5) * ((cut(phi_next) + df.Constant(1)) * self.mu1 - (cut(phi_next) - df.Constant(1)) * df.Constant(self.eps**2) * self.mu1)
         lambda_le = df.Constant(0.5) * ((cut(phi_next) + df.Constant(1)) * self.lambda1 - (cut(phi_next) - df.Constant(1)) * df.Constant(self.eps**2) * self.lambda1)
@@ -134,6 +136,57 @@ class CahnHilliardProblem:
         self.u_next.vector()[:] = self.u_now.vector()[:]
         solver.solve(pb, self.u_next.vector())
         self.u_now.vector()[:] = self.u_next.vector()[:]
+
+
+class LinearElasticityProblem:
+    def __init__(self, mesh, gamma_D, gamma_F, f, mu1, lambda1, eps):
+        self.mesh = mesh
+        self.function_space = df.VectorFunctionSpace(mesh, 'P', 1)
+
+        boundary_marker = df.MeshFunction('size_t', mesh, mesh.topology().dim()-1)
+        gamma_F.mark(boundary_marker, 1)
+
+        self.ds = df.Measure('ds', domain=mesh, subdomain_data=boundary_marker)
+
+        self.mu1 = mu1 
+        self.lambda1 = lambda1 
+
+        self.eps = eps
+
+        self.f = f
+
+        u_D = df.Constant((0, 0))
+        self.bcs = [df.DirichletBC(self.function_space, u_D, gamma_D)]
+    
+    def forms(self, phi):
+        u = df.TrialFunction(self.function_space)
+        v = df.TestFunction(self.function_space)
+        a = self.get_bilinear_form(u, v, phi) 
+        l = self.get_linear_form(v) 
+        return a, l
+    
+    def get_bilinear_form(self, u, v, phi):
+        mu_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.mu1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.mu1)
+        lambda_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.lambda1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.lambda1)
+        return 2 * mu_le * df.inner(epsilon(u), epsilon(v)) * df.dx + lambda_le * df.div(u) * df.div(v) * df.dx
+
+    def get_linear_form(self, v):
+        return df.inner(self.f, v) * self.ds(1)
+
+    def get_energy(self, u, phi):
+        mu_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.mu1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.mu1)
+        lambda_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.lambda1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.lambda1)
+        return 2 * mu_le * df.inner(epsilon(u), epsilon(u)) + lambda_le * df.div(u) * df.div(u)
+    
+    def solve(self, phi, u_sol=None):
+        a, l = self.forms(phi)
+        if u_sol is None:
+            u_sol = df.Function(self.function_space, name='u')
+        df.solve(a == l, u_sol, self.bcs, solver_parameters={
+            #'linear_solver': 'cg', 
+            #'preconditioner': 'hypre_amg'
+        } ) 
+        return u_sol
 
 
 if __name__ == '__main__':
@@ -193,9 +246,21 @@ if __name__ == '__main__':
         print('needed {}s'.format((time.time()-start)))
     else:
         V = solver.function_space.sub(1).collapse()
-        u = df.Function(V)
-        checkpoint_file.read_checkpoint(u, 'phi', 0)
+        phi = df.Function(V)
+        checkpoint_file.read_checkpoint(phi, 'phi', 0)
+
+        elasticity_solver = LinearElasticityProblem(mesh, gamma_D, gamma_F, f, mu1, lambda1, eps) 
+
+        u = elasticity_solver.solve(phi)
+
+        energy_form = elasticity_solver.get_energy(u, phi)
+        energy = df.project(energy_form, V)
 
         solution_file_phi = df.File('output/phi_noise.pvd')
-        solution_file_phi.write(u, 0)
+        solution_file_u = df.File('output/u_noise.pvd')
+        solution_file_energy = df.File('output/energy_noise.pvd')
+
+        solution_file_phi.write(phi, 0)
+        solution_file_u.write(u, 0)
+        solution_file_energy.write(energy, 0)
 
