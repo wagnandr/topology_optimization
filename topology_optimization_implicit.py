@@ -3,6 +3,8 @@ import time
 import random
 import dolfin as df
 import numpy as np
+import scipy as sp
+from matplotlib import pyplot as plt
 
 
 class InitialConditions(df.UserExpression):
@@ -187,6 +189,45 @@ class LinearElasticityProblem:
         return u_sol
 
 
+def generate_perturbation_(V, dim_grid_y):
+    dim_grid_y -= 1
+    v2d = df.vertex_to_dof_map(V)
+    #g = df.Function(V)
+    x, y = np.meshgrid(np.linspace(-4, +4, dim_grid_y * 8), np.linspace(-2, +4, dim_grid_y*4), indexing='ij')
+    #sigma, l1, l2 = 0.1, 0.05, 0.1
+    sigma, l1, l2 = 0.1, 0.1 * 10, 0.1 * 10
+    g_reshape = sigma * np.exp(- x*x/l1**2 - y*y/l2**2 )
+    #g.interpolate(df.Expression('sigma * exp( - (x[0]*x[0]) / (l1*l1) - (x[1]*x[1])/ (l2*l2) )', sigma=0.1, l1=0.05, l2=0.1, degree=1))
+    #g.interpolate(df.Expression('sigma * exp( - (x[0]*x[0]) / (l1*l1) - (x[1]*x[1])/ (l2*l2) )', sigma=0.1, l1=0.05, l2=0.1, degree=1))
+    #g_reorder = g.vector()[v2d]
+    #g_reshape = g_reorder.reshape((dim_grid_y, -1))
+    noise = np.random.normal(0, 1, g_reshape.shape)
+    g_hat = np.fft.rfftn(g_reshape, s=g_reshape.shape, axes=(0,1))
+    noise_hat = np.fft.rfftn(noise, s=g_reshape.shape, axes=(0,1))
+    eta = np.fft.irfftn(g_hat * noise_hat, s=(dim_grid_y+1, 2*dim_grid_y+1), axes=(0,1))
+    eta_fun = df.Function(V)
+    eta_fun.vector()[v2d] = eta.flatten()[:]
+    df.plot(eta_fun)
+    plt.show()
+
+    return eta_fun
+
+
+def generate_perturbation(V, dim_grid_y, sigma=1., l1=1, l2=1):
+    dim_grid_y -= 1
+    v2d = df.vertex_to_dof_map(V)
+    x, y = np.meshgrid(np.linspace(-4, +4, dim_grid_y * 8), np.linspace(-2, +4, dim_grid_y*4), indexing='ij')
+    #g_reshape = sigma * np.exp(- x*x/l1**2 - y*y/l2**2 )
+    g_reshape = sigma * np.exp(- np.sqrt(x*x/l1**2 + y*y/l2**2) )
+    noise = np.random.normal(0, 1, g_reshape.shape)
+    g_hat = np.fft.rfftn(g_reshape, s=g_reshape.shape, axes=(0,1))
+    noise_hat = np.fft.rfftn(noise, s=g_reshape.shape, axes=(0,1))
+    eta = np.fft.irfftn(g_hat * noise_hat, s=(dim_grid_y+1, dim_grid_y+1), axes=(0,1))
+    eta_fun = df.Function(V)
+    eta_fun.vector()[v2d] = eta.flatten()[:]
+    return eta_fun
+
+
 if __name__ == '__main__':
     N = 32 
     num_time_steps = 2**12 
@@ -205,6 +246,7 @@ if __name__ == '__main__':
     mu1 = df.Constant(5000)
     lambda1 = df.Constant(5000)
 
+    #mesh = df.RectangleMesh(df.Point(-1, 0), df.Point(1, 1), 2*N, N)
     mesh = df.RectangleMesh(df.Point(-1, 0), df.Point(1, 1), N, N)
 
     solver = CahnHilliardProblem(mesh, tau, eps, gamma_F, f, gamma_D, mu1, lambda1)
@@ -254,6 +296,15 @@ if __name__ == '__main__':
         solution_file_u = df.File('output/u_noise.pvd')
         solution_file_energy = df.File('output/energy_noise.pvd')
 
+        phi_vertex_values =  phi_orig.compute_vertex_values()
+        mesh.coordinates()
+        #mymap = df.vertex_to_dof_map(V)
+        #mymap_inv = np.argsort(mymap)
+        #print('> ', np.linalg.norm(phi_vertex_values[:] - phi_orig.vector()[mymap]) )
+        #print('> ', np.linalg.norm(phi_vertex_values[mymap_inv] - phi_orig.vector()[:]) )
+        # print(phi_vertex_values)
+        # print(mesh.coordinates())
+
         list_phi_samples = []
 
         # get the original energy:
@@ -281,10 +332,7 @@ if __name__ == '__main__':
 
             a = phi.vector()[:]
             a = np.arctanh(a)
-            noise = np.random.normal(0, 0.5, a.shape)
-            mask = (phi.vector()[:] < 0.8) * (phi.vector()[:] > -0.8)
-            masked_noise = noise * mask 
-            a += masked_noise 
+            a += generate_perturbation(V, N+1, sigma=1e-3, l1=0.1, l2=0.1).vector()[:]
             a = np.tanh(a)
             phi.vector()[:] = a
 
