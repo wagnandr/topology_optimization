@@ -248,12 +248,33 @@ if __name__ == '__main__':
 
         phi_orig.vector()[:] = np.clip(phi_orig.vector()[:], -1, +1)
 
+        elasticity_solver = LinearElasticityProblem(mesh, gamma_D, gamma_F, f, mu1, lambda1, eps) 
+
         solution_file_phi = df.File('output/phi_noise.pvd')
         solution_file_u = df.File('output/u_noise.pvd')
         solution_file_energy = df.File('output/energy_noise.pvd')
 
         list_phi_samples = []
 
+        # get the original energy:
+        u_orig = elasticity_solver.solve(phi_orig)
+        u_orig.rename('u', '')
+
+        energy_form_orig = elasticity_solver.get_energy(u_orig, phi_orig)
+        energy_orig = df.project(energy_form_orig, V)
+        energy_orig.rename('energy', '')
+
+        energy_value_orig = df.assemble(energy_form_orig * df.dx)
+        print('energy = {}'.format(energy_value_orig))
+
+        solution_file_u_orig = df.File('output/u_orig.pvd')
+        solution_file_phi_orig = df.File('output/phi_orig.pvd')
+        solution_file_energy_orig = df.File('output/energy_orig.pvd')
+        solution_file_phi_orig.write(phi_orig, 0)
+        solution_file_u_orig.write(u_orig, 0)
+        solution_file_energy_orig.write(energy_orig, 0)
+
+        # evaluate the samples:
         for i in range(10):
             phi = phi_orig.copy(True)
             phi.rename('phi', '') 
@@ -266,8 +287,6 @@ if __name__ == '__main__':
             a += masked_noise 
             a = np.tanh(a)
             phi.vector()[:] = a
-
-            elasticity_solver = LinearElasticityProblem(mesh, gamma_D, gamma_F, f, mu1, lambda1, eps) 
 
             u = elasticity_solver.solve(phi)
             u.rename('u', '')
