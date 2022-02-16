@@ -71,7 +71,7 @@ class CahnHilliardProblem:
 
         self.tau = tau
         self.eps = eps
-        self.gamma = df.Constant(1)
+        self.gamma = df.Constant(1e-1)
 
         self.mu1 = mu1
         self.lambda1 = lambda1
@@ -228,8 +228,38 @@ def generate_perturbation(V, dim_grid_y, sigma=1., l1=1, l2=1):
     return eta_fun
 
 
+class NoiseAdder:
+    def __init__(self):
+        self.use_tanh()
+    
+    def use_tanh(self):
+        self.intensity_transform = lambda x: np.arctanh(x)
+        self.intensity_transform_inv = lambda x: np.tanh(x)
+
+    def use_tan(self):
+        self.intensity_transform = lambda x: np.arctan( x * (2 / np.pi) )
+        self.intensity_transform_inv = lambda x: np.tanh(x) * (np.pi/2)
+
+    def use_erfc(self):
+        pass
+        #self.intensity_transform = lambda x: np.
+        #self.intensity_transform_inv = lambda x: np.tanh(x) * (np.pi/2)
+
+    def add(self, N, phi_orig):
+        V = phi_orig.function_space()
+        phi = phi_orig.copy(True)
+        phi.rename('phi', '') 
+
+        vec = phi.vector()[:]
+        #vec = self.intensity_transform(vec)
+        vec += (1 - vec**2)**2 * generate_perturbation(V, N+1, sigma=5e-3, l1=0.1, l2=0.1).vector()[:]
+        #vec = self.intensity_transform_inv(vec)
+        phi.vector()[:] = vec
+        return phi
+
+
 if __name__ == '__main__':
-    N = 32 
+    N = 64 
     num_time_steps = 2**12 
 
     tau_value = 1e-8 
@@ -238,26 +268,29 @@ if __name__ == '__main__':
     eps_value = 1. / 16 / math.pi 
     eps = df.Constant(eps_value)
 
-    gamma_F = df.CompiledSubDomain('near(x[1], 0.0) && (0.75 <= x[0] && x[0] <= 1.)')
+    gamma_F = df.CompiledSubDomain('near(x[0], 1.)')
+    #gamma_F = df.CompiledSubDomain('near(x[1], 0.0) && (0.75 <= x[0] && x[0] <= 1.)')
     gamma_D = df.CompiledSubDomain('x[0] - 1e-10 < -1 && x[0] + 1e-10 > -1')
 
-    f = df.Constant((0, -250))
+    #f = df.Constant((0, -250))
+    f = df.Constant((+250, 0))
 
     mu1 = df.Constant(5000)
     lambda1 = df.Constant(5000)
 
-    #mesh = df.RectangleMesh(df.Point(-1, 0), df.Point(1, 1), 2*N, N)
     mesh = df.RectangleMesh(df.Point(-1, 0), df.Point(1, 1), N, N)
+    #mesh = df.RectangleMesh(df.Point(-1, 0), df.Point(1, 1), N, N)
 
     solver = CahnHilliardProblem(mesh, tau, eps, gamma_F, f, gamma_D, mu1, lambda1)
 
-    solve_problem = False 
+    solve_problem = True 
 
     checkpoint_file = df.XDMFFile('output/checkpoint_phi.xdmf')
 
     if solve_problem:
         phi_init = df.Function(solver.function_space.sub(1).collapse())
-        phi_init.interpolate(InitialConditions())
+        # phi_init.interpolate(InitialConditions())
+        phi_init.interpolate(df.Expression('(0.25-1e-6 <= x[1] && x[1] <= 0.75 + 1e-6) ? 1. : -0.99', degree=1))
         df.assign(solver.u_now.sub(1), phi_init)
 
         solution_file_u = df.File('output/u.pvd')
@@ -274,7 +307,7 @@ if __name__ == '__main__':
 
             solver.solve()
 
-            tau_value *= 1.01 
+            tau_value *= 1.01
             tau.assign(tau_value)
 
             solution_file_u.write(solver.u_now.split(True)[0], t)
@@ -298,14 +331,10 @@ if __name__ == '__main__':
 
         phi_vertex_values =  phi_orig.compute_vertex_values()
         mesh.coordinates()
-        #mymap = df.vertex_to_dof_map(V)
-        #mymap_inv = np.argsort(mymap)
-        #print('> ', np.linalg.norm(phi_vertex_values[:] - phi_orig.vector()[mymap]) )
-        #print('> ', np.linalg.norm(phi_vertex_values[mymap_inv] - phi_orig.vector()[:]) )
-        # print(phi_vertex_values)
-        # print(mesh.coordinates())
 
         list_phi_samples = []
+        list_energy_values_samples = []
+        list_mass_samples = []
 
         # get the original energy:
         u_orig = elasticity_solver.solve(phi_orig)
@@ -317,6 +346,7 @@ if __name__ == '__main__':
 
         energy_value_orig = df.assemble(energy_form_orig * df.dx)
         print('energy = {}'.format(energy_value_orig))
+        mass_value_orig = df.assemble(phi_orig * df.dx)
 
         solution_file_u_orig = df.File('output/u_orig.pvd')
         solution_file_phi_orig = df.File('output/phi_orig.pvd')
@@ -325,16 +355,13 @@ if __name__ == '__main__':
         solution_file_u_orig.write(u_orig, 0)
         solution_file_energy_orig.write(energy_orig, 0)
 
-        # evaluate the samples:
-        for i in range(10):
-            phi = phi_orig.copy(True)
-            phi.rename('phi', '') 
+        noise_adder = NoiseAdder()
+        # noise_adder.use_tan()
+        noise_adder.use_tanh()
 
-            a = phi.vector()[:]
-            a = np.arctanh(a)
-            a += generate_perturbation(V, N+1, sigma=1e-3, l1=0.1, l2=0.1).vector()[:]
-            a = np.tanh(a)
-            phi.vector()[:] = a
+        # evaluate the samples:
+        for i in range(160):
+            phi = noise_adder.add(N, phi_orig)
 
             u = elasticity_solver.solve(phi)
             u.rename('u', '')
@@ -344,6 +371,7 @@ if __name__ == '__main__':
             energy.rename('energy', '')
 
             energy_value = df.assemble(energy_form * df.dx)
+            mass_value = df.assemble(phi * df.dx)
             print('energy = {}'.format(energy_value))
 
             solution_file_phi.write(phi, i)
@@ -351,6 +379,10 @@ if __name__ == '__main__':
             solution_file_energy.write(energy, i)
 
             list_phi_samples.append(phi)
+            list_energy_values_samples.append(energy_value)
+            list_mass_samples.append(mass_value)
+
+            print('variation energy', np.std(np.array(list_energy_values_samples)))
         
         phi_mean = df.Function(V, name='phi_mean')
         phi_mean_array = np.mean(np.array([phi.vector()[:].tolist() for phi in list_phi_samples]), axis=0)
@@ -358,3 +390,22 @@ if __name__ == '__main__':
 
         phi_mean_file = df.File('output/phi_mean.pvd')
         phi_mean_file.write(phi_mean, 0)
+
+        plt.plot(range(len(list_energy_values_samples)), list_energy_values_samples, 'x', label='sample')
+        plt.hlines(energy_value_orig, xmin=0, xmax=len(list_energy_values_samples), color='green', label='optimal')
+        plt.hlines(np.array(list_energy_values_samples).mean(), xmin=0, xmax=len(list_energy_values_samples), color='blue', label='sample mean')
+        plt.legend()
+        plt.ylabel('elastic energy')
+        plt.xlabel('sample')
+        plt.grid(True)
+        plt.show()
+
+        plt.plot(range(len(list_mass_samples)), list_mass_samples, 'x', label='sample')
+        plt.hlines(mass_value_orig, xmin=0, xmax=len(list_mass_samples), color='green', label='optimal')
+        plt.hlines(np.array(list_mass_samples).mean(), xmin=0, xmax=len(list_mass_samples), color='blue', label='sample mean')
+        print('variation mass', np.std(np.array(list_mass_samples)))
+        plt.legend()
+        plt.ylabel('mass')
+        plt.xlabel('sample')
+        plt.grid(True)
+        plt.show()
