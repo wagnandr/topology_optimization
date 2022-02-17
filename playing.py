@@ -114,12 +114,12 @@ class Save:
 
 
 if __name__ == '__main__':
-    N = 32 
+    N = 32
 
     eps_value = 1. / 16 / math.pi 
     eps = df.Constant(eps_value)
 
-    gamma = df.Constant(2e+0)
+    gamma = df.Constant(1e+0)
 
     #gamma_F = df.CompiledSubDomain('near(x[0], 1.)')
     gamma_F = df.CompiledSubDomain('near(x[1], 0.0) && (0.75 <= x[0] && x[0] <= 1.)')
@@ -152,6 +152,8 @@ if __name__ == '__main__':
             'maxiter': 1000,
             'gtol': 1e-16,
             'ftol': 1e-16,
+            'maxcor': 1,
+            'maxls': 100
         },
         bounds=scipy.optimize.Bounds(-np.ones(num_dof), +np.ones(num_dof), True),
         callback=Save(filename='output/phi_scipy.pvd', optimizer=grad)
