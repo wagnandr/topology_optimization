@@ -7,9 +7,11 @@ import math
 
 from topology_optimization_implicit import (
     LinearElasticityProblem,
+    NoiseAdder,
     epsilon,
     cut,
-    InitialConditions
+    InitialConditions,
+    generate_perturbation
 )
 
 
@@ -42,18 +44,35 @@ class EvaluateOptimizationQuantities:
 
         self.elasticity_solver = LinearElasticityProblem(mesh, gamma_D, gamma_F, f, mu1, lambda1, eps)
 
+        self.perturbations = []
+
+        self.noise_adder = NoiseAdder()
+    
+    def add_perturbations(self, num_perturbations, generator):
+        for _ in range(num_perturbations):
+            self.perturbations.append(generator())
+
     def assemble_energy(self, phi_vec):
         phi = self.phi
         phi.vector()[:] = phi_vec
-        u = self.elasticity_solver.solve(self.phi)
 
-        mu_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.mu1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.mu1)
-        lambda_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.lambda1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.lambda1)
 
         form = 0
         form += self.gamma * eps * df.inner(df.grad(phi), df.grad(phi)) * df.dx
         form += self.gamma/eps * potential(phi) * df.dx
-        form += 2 * mu_le * df.inner(epsilon(u), epsilon(u)) * df.dx + lambda_le * df.div(u) * df.div(u) * df.dx
+
+        if (len(self.perturbations) == 0):
+            mu_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.mu1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.mu1)
+            lambda_le = df.Constant(0.5) * ((cut(phi) + df.Constant(1)) * self.lambda1 - (cut(phi) - df.Constant(1)) * df.Constant(self.eps**2) * self.lambda1)
+            u = self.elasticity_solver.solve(self.phi)
+            form += 2 * mu_le * df.inner(epsilon(u), epsilon(u)) * df.dx + lambda_le * df.div(u) * df.div(u) * df.dx
+        else:
+            for perturbation in self.perturbations:
+                phi_tilde = self.noise_adder.add_noise(phi, perturbation.vector()[:])
+                mu_le = df.Constant(0.5) * ((cut(phi_tilde) + df.Constant(1)) * self.mu1 - (cut(phi_tilde) - df.Constant(1)) * df.Constant(self.eps**2) * self.mu1)
+                lambda_le = df.Constant(0.5) * ((cut(phi_tilde) + df.Constant(1)) * self.lambda1 - (cut(phi_tilde) - df.Constant(1)) * df.Constant(self.eps**2) * self.lambda1)
+                u = self.elasticity_solver.solve(phi_tilde)
+                form += df.Constant(1./len(self.perturbations)) * (2 * mu_le * df.inner(epsilon(u), epsilon(u)) + lambda_le * df.div(u) * df.div(u)) * df.dx
 
         mass = df.assemble(phi * df.dx(domain=self.function_space.mesh()))
 
@@ -71,13 +90,27 @@ class EvaluateOptimizationQuantities:
         u = self.elasticity_solver.solve(self.phi)
         psi = df.TrialFunction(self.function_space)
 
-        mu_diff = df.Constant((1 - self.eps**2)) * self.mu1
-        lambda_diff = df.Constant((1 - self.eps**2)) * self.lambda1
+        mu_diff = 0.5 * df.Constant((1 - self.eps**2)) * self.mu1
+        lambda_diff = 0.5 * df.Constant((1 - self.eps**2)) * self.lambda1
 
         form = 0
         form += self.gamma * eps * df.inner(df.grad(phi), df.grad(psi)) * df.dx
         form += self.gamma/eps * df.derivative(potential(phi), phi, psi) * df.dx
-        form += - df.Constant(0.5) * (2 * mu_diff * df.inner(epsilon(u), epsilon(u)) + lambda_diff * df.div(u) * df.div(u)) * psi * df.dx
+
+        if (len(self.perturbations) == 0):
+            form += - (2 * mu_diff * df.inner(epsilon(u), epsilon(u)) + lambda_diff * df.div(u) * df.div(u)) * psi * df.dx
+        else:
+            for eta in self.perturbations:
+                def diff_fun(x):
+                    a = (1 - x**2)
+                    b = np.cosh(eta.vector()[:] - np.arctanh(x))**2
+                    res = np.ones(len(x))
+                    res[np.where(np.abs(a) > 1e-8)] = (1/a/b)[np.where(np.abs(a) > 1e-8)]
+                    return res 
+                diff = df.Function(self.function_space)
+                diff.vector()[:] = diff_fun(np.clip(phi_vec, -1, +1))
+                print('diff', eta.vector()[:].min(), eta.vector()[:].max(), diff.vector()[:].min(), diff.vector()[:].max())
+                form += - df.Constant(1./len(self.perturbations)) * (2 * mu_diff * df.inner(epsilon(u), epsilon(u)) + lambda_diff * df.div(u) * df.div(u)) * diff * psi * df.dx
 
         mass = df.assemble(phi * df.dx(domain=self.function_space.mesh()))
 
@@ -136,12 +169,17 @@ if __name__ == '__main__':
     mesh = df.RectangleMesh(df.Point(-1, 0), df.Point(1, 1), N, N)
 
     grad = EvaluateOptimizationQuantities(mesh, eps, gamma_F, f, gamma_D, mu1, lambda1, penalty, gamma=gamma)
+    s = grad.create_function()
+    s.vector().zero()
+    grad.add_perturbations(1, lambda: s )
 
     num_dof = len(grad.phi0.vector()[:])
 
+    saver = Save(filename='output/phi_scipy.pvd', optimizer=grad)
+
     res = scipy.optimize.minimize(
         fun=grad.create_energy_functional(),
-        jac = grad.create_gradient_l2_functional(),
+        jac=grad.create_gradient_l2_functional(),
         #method = 'BFGS',
         #method = 'Nelder-Mead',
         #method = 'CG',
@@ -156,7 +194,29 @@ if __name__ == '__main__':
             'maxls': 100
         },
         bounds=scipy.optimize.Bounds(-np.ones(num_dof), +np.ones(num_dof), True),
-        callback=Save(filename='output/phi_scipy.pvd', optimizer=grad)
+        callback=saver
+    )
+
+    perturbation_function = lambda: generate_perturbation(grad.function_space, N+1, sigma=5e-3, l1=0.1, l2=0.1)
+    grad.add_perturbations(4, perturbation_function)
+    res = scipy.optimize.minimize(
+        fun=grad.create_energy_functional(),
+        jac=grad.create_gradient_l2_functional(),
+        #method = 'BFGS',
+        #method = 'Nelder-Mead',
+        #method = 'CG',
+        method = 'L-BFGS-B',
+        x0=np.array(grad.phi.vector()[:]),
+        options={
+            'disp': True, 
+            'maxiter': 1000,
+            'gtol': 1e-16,
+            'ftol': 1e-16,
+            'maxcor': 1,
+            'maxls': 100
+        },
+        bounds=scipy.optimize.Bounds(-np.ones(num_dof), +np.ones(num_dof), True),
+        callback=saver
     )
     
     print(res.success)

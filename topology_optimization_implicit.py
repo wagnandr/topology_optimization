@@ -71,7 +71,7 @@ class CahnHilliardProblem:
 
         self.tau = tau
         self.eps = eps
-        self.gamma = df.Constant(1e-1)
+        self.gamma = df.Constant(1)
 
         self.mu1 = mu1
         self.lambda1 = lambda1
@@ -233,7 +233,7 @@ class NoiseAdder:
         self.use_tanh()
     
     def use_tanh(self):
-        self.intensity_transform = lambda x: np.arctanh(x)
+        self.intensity_transform = lambda x: np.arctanh(np.clip(x, -1, 1))
         self.intensity_transform_inv = lambda x: np.tanh(x)
 
     def use_tan(self):
@@ -252,28 +252,39 @@ class NoiseAdder:
 
         vec = phi.vector()[:]
         #vec = self.intensity_transform(vec)
-        vec += (1 - vec**2)**2 * generate_perturbation(V, N+1, sigma=5e-3, l1=0.1, l2=0.1).vector()[:]
-        #vec = self.intensity_transform_inv(vec)
+        vec += generate_perturbation(V, N+1, sigma=5e-3, l1=0.1, l2=0.1).vector()[:]
         phi.vector()[:] = vec
         return phi
+
+    def add_noise(self, phi_orig, noise):
+        phi = phi_orig.copy(True)
+        phi.rename('phi', '') 
+
+        vec = phi.vector()[:]
+        vec = self.intensity_transform(vec)
+        vec += noise 
+        vec = self.intensity_transform_inv(vec)
+        phi.vector()[:] = vec
+        return phi
+
 
 
 if __name__ == '__main__':
     N = 64 
     num_time_steps = 2**12 
 
-    tau_value = 1e-8 
+    tau_value = 1e-7 
     tau = df.Constant(tau_value)
 
     eps_value = 1. / 16 / math.pi 
     eps = df.Constant(eps_value)
 
-    gamma_F = df.CompiledSubDomain('near(x[0], 1.)')
-    #gamma_F = df.CompiledSubDomain('near(x[1], 0.0) && (0.75 <= x[0] && x[0] <= 1.)')
+    #gamma_F = df.CompiledSubDomain('near(x[0], 1.)')
+    gamma_F = df.CompiledSubDomain('near(x[1], 0.0) && (0.75 <= x[0] && x[0] <= 1.)')
     gamma_D = df.CompiledSubDomain('x[0] - 1e-10 < -1 && x[0] + 1e-10 > -1')
 
-    #f = df.Constant((0, -250))
-    f = df.Constant((+250, 0))
+    f = df.Constant((0, -250))
+    #f = df.Constant((+250, 0))
 
     mu1 = df.Constant(5000)
     lambda1 = df.Constant(5000)
@@ -289,8 +300,8 @@ if __name__ == '__main__':
 
     if solve_problem:
         phi_init = df.Function(solver.function_space.sub(1).collapse())
-        # phi_init.interpolate(InitialConditions())
-        phi_init.interpolate(df.Expression('(0.25-1e-6 <= x[1] && x[1] <= 0.75 + 1e-6) ? 1. : -0.99', degree=1))
+        phi_init.interpolate(InitialConditions())
+        # phi_init.interpolate(df.Expression('(0.25-1e-6 <= x[1] && x[1] <= 0.75 + 1e-6) ? 1. : -0.99', degree=1))
         df.assign(solver.u_now.sub(1), phi_init)
 
         solution_file_u = df.File('output/u.pvd')
@@ -303,7 +314,7 @@ if __name__ == '__main__':
         for it_t in range(1,num_time_steps+1):
             t += tau_value
 
-            print('it = {}/{}, t = {}'.format(it_t, num_time_steps, t))
+            print('it = {}/{}, t = {}, tau = {}'.format(it_t, num_time_steps, t, tau_value))
 
             solver.solve()
 
@@ -313,7 +324,7 @@ if __name__ == '__main__':
             solution_file_u.write(solver.u_now.split(True)[0], t)
             solution_file_phi.write(solver.u_now.split(True)[1], t)
         
-        checkpoint_file.write_checkpoint(solver.u_now.split(True)[1], 'phi', 0, df.XDMFFile.Encoding.HDF5, False)
+            checkpoint_file.write_checkpoint(solver.u_now.split(True)[1], 'phi', 0, df.XDMFFile.Encoding.HDF5, False)
 
         print('needed {}s'.format((time.time()-start)))
     else:
